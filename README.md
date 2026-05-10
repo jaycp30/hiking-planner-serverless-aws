@@ -1,5 +1,5 @@
 # Key Learning Points — AWS SAM & Serverless Deployment
-### From the Japan Hiking Dashboard Exercise
+### From the Hiking Dashboard Exercise
 
 ---
 
@@ -44,7 +44,7 @@ Browser
   └── CloudFront (CDN, HTTPS, global edge)
         ├── S3 (React static files)
         └── API Gateway v2 HTTP API
-              └── Lambda (Node.js 20, handler.js)
+              └── Lambda (Node.js 22, handler.js)
                     └── Anthropic API (web_search tool)
 ```
 
