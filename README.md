@@ -49,7 +49,7 @@ Browser
 ```
 
 **Why this shape:**
-- **S3 + CloudFront** serves the React app. S3 is dirt cheap (~$0.02/month for a 1MB app). CloudFront puts it on edge nodes globally, including Asia-Pacific.
+- **S3 + CloudFront** serves the React app. S3 is cheap (~$0.02/month for a 1MB app). CloudFront puts it on edge nodes globally, including Asia-Pacific.
 - **API Gateway + Lambda** handles the backend. Serverless means you pay only when someone actually searches — no idle EC2 or container sitting running 24/7.
 - **No VPC, no RDS, no containers.** The app has no database, no persistent state. Everything is stateless, which is why serverless fits perfectly.
 

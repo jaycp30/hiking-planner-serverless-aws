@@ -235,8 +235,23 @@ export default function HikingDashboard() {
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
           let event; try { event = JSON.parse(line.slice(6)); } catch { continue; }
-          if (event.type === "progress") setProgress({ found: event.found, total: event.total });
-          else if (event.type === "batch") { setTrails(prev => [...prev, ...event.trails]); setProgress({ found: event.found, total: event.total }); }
+          if (event.type === "progress") {
+            setProgress({
+              found: event.found,
+              total: event.total,
+              message: event.message,
+              cached: event.cached,
+            });
+          }
+          else if (event.type === "batch") {
+            setTrails(prev => [...prev, ...event.trails]);
+            setProgress({
+              found: event.found,
+              total: event.total,
+              message: event.message,
+              cached: event.cached,
+            });
+          }
           else if (event.type === "complete") setSearched(true);
           else if (event.type === "error") throw new Error(event.error);
         }
@@ -544,8 +559,18 @@ export default function HikingDashboard() {
       <main style={{ padding: "32px 48px 40px" }}>
         {error && (
           <div style={{ background: "#fff0ec", border: "1px solid #f5c2be", borderRadius: 8,
-            color: "#ce5139", padding: "12px 18px", marginBottom: 24, fontSize: 14 }}>
-            {error}
+            color: "#ce5139", padding: "14px 18px", marginBottom: 24, fontSize: 14,
+            display: "flex", justifyContent: "space-between", gap: 16, alignItems: "center",
+            flexWrap: "wrap" }}>
+            <span>{error}</span>
+            {location.trim() && (
+              <button onClick={searchTrails} disabled={loading}
+                style={{ height: 36, padding: "0 15px", border: "1px solid #ce5139",
+                  borderRadius: 8, background: "#fff", color: "#ce5139", fontSize: 13,
+                  fontWeight: 600, cursor: loading ? "not-allowed" : "pointer" }}>
+                Retry same search
+              </button>
+            )}
           </div>
         )}
 
@@ -559,12 +584,22 @@ export default function HikingDashboard() {
             </div>
             <div style={{ fontFamily: '"Cormorant Garamond", Georgia, serif', fontSize: 24,
               fontStyle: "italic", fontWeight: 300, color: "#435448" }}>
-              {progress ? `Found ${progress.found} / ${progress.total} trails…` : "Searching trails…"}
+              {progress?.message || "Searching trails…"}
+            </div>
+            {progress && (
+              <div style={{ marginTop: 8, color: "#7e877f", fontSize: 13 }}>
+                {progress.cached
+                  ? "Using cached results to save API credits."
+                  : `Found ${progress.found || 0} / ${progress.total || 20} trails so far.`}
+              </div>
+            )}
+            <div style={{ marginTop: 8, color: "#9aa099", fontSize: 12 }}>
+              Live web search can take a moment. I will retry once when the provider comes back empty.
             </div>
           </div>
         )}
 
-        {!loading && !searched && trails.length === 0 && (
+        {!loading && !error && !searched && trails.length === 0 && (
           <div style={{ textAlign: "center", padding: "100px 0" }}>
             <div style={{ fontSize: 56, marginBottom: 20 }}>⛰️</div>
             <div style={{ fontFamily: '"Cormorant Garamond", Georgia, serif', fontSize: 30,

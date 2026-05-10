@@ -5,11 +5,16 @@ const { DynamoDBDocumentClient, GetCommand, PutCommand } = require("@aws-sdk/lib
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const OPENAI_API_URL    = "https://api.openai.com/v1/responses";
+const SEARCH_CACHE_TTL_SECONDS = 6 * 60 * 60;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 function trailCacheKey(name) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 100);
+}
+
+function searchCacheKey(location, model) {
+  return `search:${model || "haiku"}:${trailCacheKey(location)}`;
 }
 
 async function getCachedImages(name) {
@@ -33,6 +38,39 @@ async function setCachedImages(name, images) {
       },
     }));
   } catch (err) { console.error("DynamoDB write failed:", err); }
+}
+
+async function getCachedSearch(location, model) {
+  try {
+    const result = await ddb.send(new GetCommand({
+      TableName: process.env.TABLE_NAME,
+      Key: { trailKey: searchCacheKey(location, model) },
+    }));
+    return Array.isArray(result.Item?.trails) && result.Item.trails.length > 0
+      ? result.Item.trails
+      : null;
+  } catch (err) {
+    console.error("DynamoDB search cache read failed:", err);
+    return null;
+  }
+}
+
+async function setCachedSearch(location, model, trails) {
+  if (!Array.isArray(trails) || trails.length === 0) return;
+  try {
+    await ddb.send(new PutCommand({
+      TableName: process.env.TABLE_NAME,
+      Item: {
+        trailKey: searchCacheKey(location, model),
+        location,
+        model,
+        trails,
+        ttl: Math.floor(Date.now() / 1000) + SEARCH_CACHE_TTL_SECONDS,
+      },
+    }));
+  } catch (err) {
+    console.error("DynamoDB search cache write failed:", err);
+  }
 }
 
 async function fetchWikimediaImages(trailName) {
@@ -163,7 +201,12 @@ async function searchWithClaude(location, apiKey, stream) {
   const allTrails = [];
 
   for (let i = 0; i < 3 && allTrails.length < TARGET; i++) {
-    sse(stream, { type: "progress", found: allTrails.length, total: TARGET });
+    sse(stream, {
+      type: "progress",
+      found: allTrails.length,
+      total: TARGET,
+      message: i === 0 ? "Searching AllTrails and YAMAP..." : "Retrying live search for better trail data...",
+    });
 
     const exclude = allTrails.length > 0
       ? " Skip trails already found (search different areas or difficulty levels)."
@@ -202,10 +245,22 @@ async function searchWithClaude(location, apiKey, stream) {
       continue;
     }
 
+    sse(stream, {
+      type: "progress",
+      found: allTrails.length,
+      total: TARGET,
+      message: "Adding map details and trail photos...",
+    });
     const raw = parsed.map((t, j) => ({ ...t, id: allTrails.length + j + 1 }));
     const batch = await Promise.all(raw.map(enrichWithImages));
     allTrails.push(...batch);
-    sse(stream, { type: "batch", trails: batch, found: allTrails.length, total: TARGET });
+    sse(stream, {
+      type: "batch",
+      trails: batch,
+      found: allTrails.length,
+      total: TARGET,
+      message: `Found ${allTrails.length} trails so far...`,
+    });
   }
 
   if (allTrails.length === 0) {
@@ -216,35 +271,49 @@ async function searchWithClaude(location, apiKey, stream) {
     return;
   }
 
+  await setCachedSearch(location, "haiku", allTrails);
   sse(stream, { type: "complete", found: allTrails.length, total: TARGET });
 }
 
 async function searchWithGPT(location, apiKey, stream) {
   const TARGET = 20;
-  sse(stream, { type: "progress", found: 0, total: TARGET });
+  let parsed = [];
 
-  const response = await fetch(OPENAI_API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-5.4-mini",
-      instructions: SYSTEM_PROMPT,
-      tools: [{ type: "web_search_preview" }],
-      input: `Find ${TARGET} hiking trails near ${location}. Include AllTrails URLs, and YAMAP URLs if this is a Japan location. Include photos where available. Reply with ONLY the JSON array, no other text.`,
-    }),
-  });
+  for (let attempt = 0; attempt < 2 && parsed.length === 0; attempt++) {
+    sse(stream, {
+      type: "progress",
+      found: 0,
+      total: TARGET,
+      message: attempt === 0 ? "Searching live trail sources..." : "Retrying live search for better trail data...",
+    });
 
-  const data = await response.json();
+    const response = await fetch(OPENAI_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-5.4-mini",
+        instructions: SYSTEM_PROMPT,
+        tools: [{ type: "web_search_preview" }],
+        input: `Find ${TARGET} hiking trails near ${location}. Include AllTrails URLs, and YAMAP URLs if this is a Japan location. Include photos where available. Reply with ONLY the JSON array, no other text.`,
+      }),
+    });
 
-  if (data.error) {
-    sse(stream, { type: "error", error: data.error.message || "OpenAI API error" });
-    return;
+    const data = await response.json();
+
+    if (data.error) {
+      sse(stream, { type: "error", error: data.error.message || "OpenAI API error" });
+      return;
+    }
+
+    parsed = parseOpenAITrails(data);
+    if (parsed.length === 0) {
+      console.log(`OpenAI returned no parseable trails on attempt ${attempt + 1} for location: ${location}`);
+    }
   }
 
-  const parsed = parseOpenAITrails(data);
   if (parsed.length === 0) {
     sse(stream, {
       type: "error",
@@ -253,9 +322,22 @@ async function searchWithGPT(location, apiKey, stream) {
     return;
   }
 
+  sse(stream, {
+    type: "progress",
+    found: 0,
+    total: TARGET,
+    message: "Adding map details and trail photos...",
+  });
   const raw = parsed.map((t, i) => ({ ...t, id: i + 1 }));
   const trails = await Promise.all(raw.map(enrichWithImages));
-  sse(stream, { type: "batch", trails, found: trails.length, total: TARGET });
+  await setCachedSearch(location, "gpt54", trails);
+  sse(stream, {
+    type: "batch",
+    trails,
+    found: trails.length,
+    total: TARGET,
+    message: `Found ${trails.length} trails.`,
+  });
   sse(stream, { type: "complete", found: trails.length, total: TARGET });
 }
 
@@ -280,21 +362,44 @@ const handler = awslambda.streamifyResponse(async (event, responseStream) => {
   try {
     const body = JSON.parse(event.body || "{}");
     const { location, model } = body;
+    const searchLocation = location?.trim();
+    const searchModel = model === "gpt54" ? "gpt54" : "haiku";
 
-    if (!location?.trim()) {
+    if (!searchLocation) {
       sse(stream, { type: "error", error: "location is required" });
       stream.end();
       return;
     }
 
-    if (model === "gpt54") {
+    sse(stream, {
+      type: "progress",
+      found: 0,
+      total: 20,
+      message: "Checking recent searches...",
+    });
+    const cached = await getCachedSearch(searchLocation, searchModel);
+    if (cached) {
+      sse(stream, {
+        type: "batch",
+        trails: cached,
+        found: cached.length,
+        total: 20,
+        cached: true,
+        message: "Loaded a recent cached search.",
+      });
+      sse(stream, { type: "complete", found: cached.length, total: 20, cached: true });
+      stream.end();
+      return;
+    }
+
+    if (searchModel === "gpt54") {
       const apiKey = process.env.OPENAI_API_KEY;
       if (!apiKey) {
         sse(stream, { type: "error", error: "OpenAI API key not configured" });
         stream.end();
         return;
       }
-      await searchWithGPT(location.trim(), apiKey, stream);
+      await searchWithGPT(searchLocation, apiKey, stream);
     } else {
       const apiKey = process.env.ANTHROPIC_API_KEY;
       if (!apiKey) {
@@ -302,7 +407,7 @@ const handler = awslambda.streamifyResponse(async (event, responseStream) => {
         stream.end();
         return;
       }
-      await searchWithClaude(location.trim(), apiKey, stream);
+      await searchWithClaude(searchLocation, apiKey, stream);
     }
   } catch (err) {
     console.error("Handler error:", err);
