@@ -1,0 +1,13 @@
+{
+  "name": "hiking-dashboard-backend",
+  "version": "1.0.0",
+  "description": "Lambda backend for Japan Hiking Dashboard",
+  "main": "handler.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3",
+    "@aws-sdk/lib-dynamodb": "^3"
+  }
+}

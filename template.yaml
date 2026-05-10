@@ -1,0 +1,179 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Hiking Dashboard — Serverless backend + static frontend hosting
+
+Parameters:
+  AnthropicApiKey:
+    Type: String
+    NoEcho: true
+    Description: Your Anthropic API key (from console.anthropic.com)
+
+  OpenAiApiKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Your OpenAI API key (from platform.openai.com)
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 60        # web_search can take a while
+    MemorySize: 512
+    Environment:
+      Variables:
+        ANTHROPIC_API_KEY: !Ref AnthropicApiKey
+        OPENAI_API_KEY: !Ref OpenAiApiKey
+        TABLE_NAME: !Ref TrailImagesTable
+
+Resources:
+
+  # ── HTTP API (API Gateway v2) ───────────────────────────────────────────────
+  HikingApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowHeaders:
+          - Content-Type
+        AllowMethods:
+          - POST
+          - OPTIONS
+
+  # ── Lambda function ─────────────────────────────────────────────────────────
+  SearchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: hiking-dashboard-search
+      Handler: handler.handler
+      CodeUri: backend/
+      Description: Calls Anthropic API with web_search to find AllTrails data
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TrailImagesTable
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: RESPONSE_STREAM
+        Cors:
+          AllowOrigins:
+            - "*"
+          AllowHeaders:
+            - "Content-Type"
+          AllowMethods:
+            - "POST"
+      Events:
+        SearchPost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HikingApi
+            Path: /search
+            Method: POST
+        SearchOptions:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HikingApi
+            Path: /search
+            Method: OPTIONS
+
+  # ── DynamoDB table for trail image cache ────────────────────────────────────
+  TrailImagesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: hiking-trail-images
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: trailKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: trailKey
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # ── S3 bucket for the React frontend ────────────────────────────────────────
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "hiking-dashboard-frontend-${AWS::AccountId}-${AWS::Region}"
+
+  # Allow CloudFront to read from the bucket (OAC pattern)
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+
+  # Origin Access Control (replaces legacy OAI)
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "hiking-dashboard-oac-${AWS::Region}"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # ── CloudFront distribution ──────────────────────────────────────────────────
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "Hiking Dashboard (${AWS::Region})"
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_200  # includes Asia-Pacific edges
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt OriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized (managed)
+          Compress: true
+        # SPA fallback — send 403/404 back to index.html so React Router works
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+# ── Outputs ──────────────────────────────────────────────────────────────────
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint
+    Value: !Sub "https://${HikingApi}.execute-api.${AWS::Region}.amazonaws.com"
+
+  StreamUrl:
+    Description: Lambda Function URL for streaming — paste this into frontend/.env as VITE_API_URL
+    Value: !GetAtt SearchFunctionUrl.FunctionUrl
+
+  CloudFrontUrl:
+    Description: Your app URL — share this with friends
+    Value: !Sub "https://${CloudFrontDistribution.DomainName}"
+
+  FrontendBucketName:
+    Description: S3 bucket name — used in the deploy-frontend.sh script
+    Value: !Ref FrontendBucket
+
+  CloudFrontId:
+    Description: CloudFront distribution ID — used for cache invalidation
+    Value: !Ref CloudFrontDistribution
