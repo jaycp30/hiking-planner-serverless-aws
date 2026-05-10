@@ -166,13 +166,6 @@ You need to run this separately from `sam deploy` any time the frontend code cha
 
 ---
 
-### Issue 6: API key exposed in chat
-**What happened:** The Anthropic API key was pasted in plain text during the `curl` debugging step and became visible in the conversation.  
-**Fix:** Rotate the key immediately — delete it in the Anthropic console, create a new one, redeploy with `sam deploy` to update the Lambda environment variable.  
-**Lesson:** Never paste API keys directly in chat or in code. Always use environment variables. SAM stores your key as a CloudFormation parameter marked `NoEcho: true` so it doesn't appear in logs or console output.
-
----
-
 ## 6. Cost Reality Check
 
 After one debugging session:
