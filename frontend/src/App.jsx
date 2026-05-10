@@ -490,6 +490,10 @@ export default function HikingDashboard() {
             {m.label}
           </button>
         ))}
+        <span style={{ flexBasis: "100%", marginTop: -4, marginLeft: 1, color: "#7a857d",
+          fontSize: 12, lineHeight: 1.45 }}>
+          Claude and OpenAI models consume API credits. If a search returns a token limit error, it probably means the credits ran out :)
+        </span>
 
         <div style={{ width: 1, height: 20, background: "#ddd6cb" }} />
 
