@@ -121,6 +121,7 @@ Not a SAM command, but the bridge SAM doesn't provide. This script:
 
 You need to run this separately from `sam deploy` any time the frontend code changes.
 
+
 ---
 
 ## 5. Issues We Hit and How We Fixed Them
@@ -130,6 +131,7 @@ You need to run this separately from `sam deploy` any time the frontend code cha
 **Cause:** The model ID in `handler.js` referenced a model version that no longer existed.  
 **Fix:** Updated to `claude-sonnet-4-6`.
 
+
 ---
 
 ### Issue 2: Lambda timeout (60 seconds)
@@ -137,7 +139,8 @@ You need to run this separately from `sam deploy` any time the frontend code cha
 **Cause:** The Anthropic API with web search does multiple search rounds internally before returning. This takes 30–50 seconds, and the Lambda was configured with a 60-second timeout — not enough headroom.  
 **Fix:** Changed `Timeout: 60` to `Timeout: 120` in `template.yaml`.
 
-**Lesson:** Lambda timeout and API Gateway timeout are separate ceilings. API Gateway v2 hard-caps at 29 seconds, but Lambda can run longer for async workloads. For web-search-heavy AI calls, 90–120 seconds is a realistic timeout.
+**Lesson:** Lambda timeout and API Gateway timeout are separate ceilings. API Gateway v2 hard-caps at 29 seconds, but Lambda can run longer for async workloads. For web-search-heavy AI calls, 90–120 seconds is a good timeout.
+
 
 ---
 
@@ -146,12 +149,14 @@ You need to run this separately from `sam deploy` any time the frontend code cha
 **Cause:** `handler.js` had `"anthropic-beta": "web-search-2025-03-05"` — a beta header that's no longer required since web search went GA. We also initially tried `web_search_20260209`, which spun up a code execution environment and consumed all output tokens before finishing.  
 **Fix:** Removed the beta header entirely. Switched back to `web_search_20250305` (still valid, simpler execution path, no code execution overhead).
 
+
 ---
 
 ### Issue 4: Rate limit (30,000 input tokens/minute)
 **Error:** `This request would exceed your organization's rate limit of 30,000 input tokens per minute`.  
 **Cause:** All the repeated failed debug attempts burned through the rate limit. Web search feeds large chunks of search result HTML back into the context as input tokens, which adds up fast.  
 **Fix:** Wait 2–3 minutes for the window to reset. Long term: trim the system prompt (we reduced it from ~400 tokens to ~120 tokens), and rate limits increase automatically as API spend grows.
+
 
 ---
 
@@ -181,6 +186,7 @@ After one debugging session:
 
 **Key insight:** The Anthropic API bills for tokens consumed even if Lambda times out and kills the connection. The API was doing its work on Anthropic's side — you just never received the response.
 
+
 ---
 
 ## 7. SAM Mental Model — What to Remember
@@ -204,3 +210,12 @@ Anything outside SAM's scope you handle yourself — shell scripts, Makefiles, o
 
 **When to use SAM:** APIs, event-driven functions, scheduled jobs, webhook handlers. Anything that's Lambda-centric.  
 **When to reach for something else:** Full-stack apps with complex frontends (Amplify), multi-service platforms with databases and containers (CDK or Terraform), or situations where you need maximum infrastructure control (raw CloudFormation).
+
+
+---
+
+Demo (webapp is not optimized for mobile web browser): 
+[Watch Demo: Chatting with OpenClaw via Line](https://1drv.ms/v/c/060d23632df8ec38/IQC0GsULKl5vQbGlm-2_u-9PAfIvJcA52rRzNVS4MX-VOwA?e=62fRyP)
+
+---
+
