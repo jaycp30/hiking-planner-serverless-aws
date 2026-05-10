@@ -215,7 +215,7 @@ Anything outside SAM's scope you handle yourself — shell scripts, Makefiles, o
 ---
 
 Demo (webapp is not optimized for mobile web browser): 
-[Watch Demo: Chatting with OpenClaw via Line](https://1drv.ms/v/c/060d23632df8ec38/IQC0GsULKl5vQbGlm-2_u-9PAfIvJcA52rRzNVS4MX-VOwA?e=62fRyP)
+[Watch Demo: Chatting with OpenClaw via Line](https://1drv.ms/v/c/060d23632df8ec38/IQBPFIK6AnNgTponA_W9GEcBASd_L7K9BqaLFMVM5CGIndY?e=YWk4Fp)
 
 ---
 
