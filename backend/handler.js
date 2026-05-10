@@ -6,6 +6,8 @@ const { DynamoDBDocumentClient, GetCommand, PutCommand } = require("@aws-sdk/lib
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const OPENAI_API_URL    = "https://api.openai.com/v1/responses";
 const SEARCH_CACHE_TTL_SECONDS = 6 * 60 * 60;
+const DEFAULT_TRAIL_LIMIT = 10;
+const MAX_TRAIL_LIMIT = 20;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -13,8 +15,14 @@ function trailCacheKey(name) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 100);
 }
 
-function searchCacheKey(location, model) {
-  return `search:${model || "haiku"}:${trailCacheKey(location)}`;
+function clampTrailLimit(limit) {
+  const parsed = Number(limit);
+  if (!Number.isFinite(parsed)) return DEFAULT_TRAIL_LIMIT;
+  return Math.min(MAX_TRAIL_LIMIT, Math.max(1, Math.round(parsed)));
+}
+
+function searchCacheKey(location, model, limit) {
+  return `search:${model || "haiku"}:${clampTrailLimit(limit)}:${trailCacheKey(location)}`;
 }
 
 async function getCachedImages(name) {
@@ -40,11 +48,11 @@ async function setCachedImages(name, images) {
   } catch (err) { console.error("DynamoDB write failed:", err); }
 }
 
-async function getCachedSearch(location, model) {
+async function getCachedSearch(location, model, limit) {
   try {
     const result = await ddb.send(new GetCommand({
       TableName: process.env.TABLE_NAME,
-      Key: { trailKey: searchCacheKey(location, model) },
+      Key: { trailKey: searchCacheKey(location, model, limit) },
     }));
     return Array.isArray(result.Item?.trails) && result.Item.trails.length > 0
       ? result.Item.trails
@@ -55,15 +63,16 @@ async function getCachedSearch(location, model) {
   }
 }
 
-async function setCachedSearch(location, model, trails) {
+async function setCachedSearch(location, model, limit, trails) {
   if (!Array.isArray(trails) || trails.length === 0) return;
   try {
     await ddb.send(new PutCommand({
       TableName: process.env.TABLE_NAME,
       Item: {
-        trailKey: searchCacheKey(location, model),
+        trailKey: searchCacheKey(location, model, limit),
         location,
         model,
+        limit: clampTrailLimit(limit),
         trails,
         ttl: Math.floor(Date.now() / 1000) + SEARCH_CACHE_TTL_SECONDS,
       },
@@ -195,12 +204,13 @@ function sse(stream, data) {
   stream.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-async function searchWithClaude(location, apiKey, stream) {
-  const TARGET = 20;
-  const BATCH  = 7;
+async function searchWithClaude(location, apiKey, stream, targetLimit = DEFAULT_TRAIL_LIMIT) {
+  const TARGET = clampTrailLimit(targetLimit);
+  const BATCH  = Math.min(5, TARGET);
   const allTrails = [];
+  const maxAttempts = Math.ceil(TARGET / BATCH) + 1;
 
-  for (let i = 0; i < 3 && allTrails.length < TARGET; i++) {
+  for (let i = 0; i < maxAttempts && allTrails.length < TARGET; i++) {
     sse(stream, {
       type: "progress",
       found: allTrails.length,
@@ -251,7 +261,8 @@ async function searchWithClaude(location, apiKey, stream) {
       total: TARGET,
       message: "Adding map details and trail photos...",
     });
-    const raw = parsed.map((t, j) => ({ ...t, id: allTrails.length + j + 1 }));
+    const remaining = TARGET - allTrails.length;
+    const raw = parsed.slice(0, remaining).map((t, j) => ({ ...t, id: allTrails.length + j + 1 }));
     const batch = await Promise.all(raw.map(enrichWithImages));
     allTrails.push(...batch);
     sse(stream, {
@@ -271,12 +282,12 @@ async function searchWithClaude(location, apiKey, stream) {
     return;
   }
 
-  await setCachedSearch(location, "haiku", allTrails);
+  await setCachedSearch(location, "haiku", TARGET, allTrails);
   sse(stream, { type: "complete", found: allTrails.length, total: TARGET });
 }
 
-async function searchWithGPT(location, apiKey, stream) {
-  const TARGET = 20;
+async function searchWithGPT(location, apiKey, stream, targetLimit = DEFAULT_TRAIL_LIMIT) {
+  const TARGET = clampTrailLimit(targetLimit);
   let parsed = [];
 
   for (let attempt = 0; attempt < 2 && parsed.length === 0; attempt++) {
@@ -328,9 +339,9 @@ async function searchWithGPT(location, apiKey, stream) {
     total: TARGET,
     message: "Adding map details and trail photos...",
   });
-  const raw = parsed.map((t, i) => ({ ...t, id: i + 1 }));
+  const raw = parsed.slice(0, TARGET).map((t, i) => ({ ...t, id: i + 1 }));
   const trails = await Promise.all(raw.map(enrichWithImages));
-  await setCachedSearch(location, "gpt54", trails);
+  await setCachedSearch(location, "gpt54", TARGET, trails);
   sse(stream, {
     type: "batch",
     trails,
@@ -361,9 +372,10 @@ const handler = awslambda.streamifyResponse(async (event, responseStream) => {
 
   try {
     const body = JSON.parse(event.body || "{}");
-    const { location, model } = body;
+    const { location, model, limit } = body;
     const searchLocation = location?.trim();
     const searchModel = model === "gpt54" ? "gpt54" : "haiku";
+    const searchLimit = clampTrailLimit(limit);
 
     if (!searchLocation) {
       sse(stream, { type: "error", error: "location is required" });
@@ -374,20 +386,20 @@ const handler = awslambda.streamifyResponse(async (event, responseStream) => {
     sse(stream, {
       type: "progress",
       found: 0,
-      total: 20,
+      total: searchLimit,
       message: "Checking recent searches...",
     });
-    const cached = await getCachedSearch(searchLocation, searchModel);
+    const cached = await getCachedSearch(searchLocation, searchModel, searchLimit);
     if (cached) {
       sse(stream, {
         type: "batch",
         trails: cached,
         found: cached.length,
-        total: 20,
+        total: searchLimit,
         cached: true,
         message: "Loaded a recent cached search.",
       });
-      sse(stream, { type: "complete", found: cached.length, total: 20, cached: true });
+      sse(stream, { type: "complete", found: cached.length, total: searchLimit, cached: true });
       stream.end();
       return;
     }
@@ -399,7 +411,7 @@ const handler = awslambda.streamifyResponse(async (event, responseStream) => {
         stream.end();
         return;
       }
-      await searchWithGPT(searchLocation, apiKey, stream);
+      await searchWithGPT(searchLocation, apiKey, stream, searchLimit);
     } else {
       const apiKey = process.env.ANTHROPIC_API_KEY;
       if (!apiKey) {
@@ -407,7 +419,7 @@ const handler = awslambda.streamifyResponse(async (event, responseStream) => {
         stream.end();
         return;
       }
-      await searchWithClaude(searchLocation, apiKey, stream);
+      await searchWithClaude(searchLocation, apiKey, stream, searchLimit);
     }
   } catch (err) {
     console.error("Handler error:", err);

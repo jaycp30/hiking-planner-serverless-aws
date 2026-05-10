@@ -1,6 +1,8 @@
 import { useState } from "react";
 
 const API_URL = import.meta.env.VITE_API_URL;
+const INITIAL_TRAIL_LIMIT = 10;
+const MAX_TRAIL_LIMIT = 20;
 
 const DIFF = {
   easy:     { bg: "#eef5eb", text: "#4f8a42", dot: "#7ead66", border: "#7ead66" },
@@ -71,6 +73,8 @@ function MapPreview({ trail }) {
   if (!trail.latitude || !trail.longitude) return null;
   const { latitude: lat, longitude: lng } = trail;
   const d = 0.025;
+  const osmUrl = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=14/${lat}/${lng}`;
+  const googleMapsUrl = `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
   return (
     <div style={{ marginBottom: 10 }}>
       <a onClick={() => setOpen(o => !o)} style={{ height: 42, display: "flex", alignItems: "center",
@@ -83,12 +87,19 @@ function MapPreview({ trail }) {
           <iframe title={trail.name}
             src={`https://www.openstreetmap.org/export/embed.html?bbox=${lng-d},${lat-d},${lng+d},${lat+d}&layer=mapnik&marker=${lat},${lng}`}
             style={{ width: "100%", height: 180, border: "none", display: "block" }} scrolling="no" />
-          <a href={`https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=14/${lat}/${lng}`}
-            target="_blank" rel="noopener noreferrer"
-            style={{ display: "block", textAlign: "right", fontSize: 10, color: "#8a7a60",
-              padding: "4px 8px", textDecoration: "none", background: "#f5f0e8" }}>
-            Open in OpenStreetMap ↗
-          </a>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", borderTop: "1px solid #ddd6cb",
+            background: "#f5f0e8" }}>
+            <a href={osmUrl} target="_blank" rel="noopener noreferrer"
+              style={{ display: "block", textAlign: "center", fontSize: 11, color: "#6b785f",
+                padding: "7px 8px", textDecoration: "none", borderRight: "1px solid #ddd6cb" }}>
+              Open in OSM ↗
+            </a>
+            <a href={googleMapsUrl} target="_blank" rel="noopener noreferrer"
+              style={{ display: "block", textAlign: "center", fontSize: 11, color: "#2c7f45",
+                padding: "7px 8px", textDecoration: "none" }}>
+              Google Maps ↗
+            </a>
+          </div>
         </div>
       )}
     </div>
@@ -209,15 +220,20 @@ export default function HikingDashboard() {
   const [difficulty, setDifficulty] = useState("all");
   const [sortBy, setSortBy]         = useState("default");
   const [searched, setSearched]     = useState(false);
+  const [requestedLimit, setLimit]   = useState(INITIAL_TRAIL_LIMIT);
 
-  const searchTrails = async () => {
+  const searchTrails = async (limit = INITIAL_TRAIL_LIMIT, options = {}) => {
     if (!location.trim() || loading) return;
-    setLoading(true); setError(null); setTrails([]); setSearched(false); setProgress(null);
+    const nextLimit = Math.min(MAX_TRAIL_LIMIT, Math.max(INITIAL_TRAIL_LIMIT, limit));
+    const keepResults = options.keepResults && trails.length > 0;
+    let nextTrails = [];
+    setLoading(true); setError(null); setSearched(false); setProgress(null); setLimit(nextLimit);
+    if (!keepResults) setTrails([]);
     try {
       const res = await fetch(API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ location: location.trim(), model }),
+        body: JSON.stringify({ location: location.trim(), model, limit: nextLimit }),
       });
       if (!res.ok || !res.body) {
         const data = await res.json().catch(() => ({}));
@@ -244,7 +260,8 @@ export default function HikingDashboard() {
             });
           }
           else if (event.type === "batch") {
-            setTrails(prev => [...prev, ...event.trails]);
+            nextTrails = [...nextTrails, ...event.trails];
+            setTrails(nextTrails);
             setProgress({
               found: event.found,
               total: event.total,
@@ -460,8 +477,8 @@ export default function HikingDashboard() {
             font: '11px "Space Mono", monospace', letterSpacing: ".16em", textTransform: "uppercase" }}>
             Trail area
           </label>
-          <input value={location} onChange={e => setLocation(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && searchTrails()}
+            <input value={location} onChange={e => setLocation(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && searchTrails(INITIAL_TRAIL_LIMIT)}
             placeholder="⌖  e.g., Taipei, Kamikochi, Banff, Kinabalu Park"
             style={{ width: "100%", height: 58, padding: "0 18px", display: "flex", alignItems: "center",
               border: "1px solid #ddd6cb", borderRadius: 8, background: "#fff",
@@ -473,13 +490,13 @@ export default function HikingDashboard() {
             Your starting point (for transit)
           </label>
           <input value={startingPoint} onChange={e => setStart(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && searchTrails()}
+            onKeyDown={e => e.key === "Enter" && searchTrails(INITIAL_TRAIL_LIMIT)}
             placeholder="▣  e.g., Shinjuku Station, London, Edmonton, Rifugio Auronzo"
             style={{ width: "100%", height: 58, padding: "0 18px",
               border: "1px solid #ddd6cb", borderRadius: 8, background: "#fff",
               color: "#26392f", fontSize: 15 }} />
         </div>
-        <button onClick={searchTrails} disabled={loading || !location.trim()}
+        <button onClick={() => searchTrails(INITIAL_TRAIL_LIMIT)} disabled={loading || !location.trim()}
           style={{ height: 58, padding: "0 36px", border: "none", borderRadius: 8,
             background: loading || !location.trim() ? "#8aaa90" : "linear-gradient(#668462,#466747)",
             color: "#fff", fontSize: 16, fontWeight: 500,
@@ -508,7 +525,7 @@ export default function HikingDashboard() {
         <span style={{ flexBasis: "100%", marginTop: -4, marginLeft: 1, color: "#7a857d",
           fontSize: 12, lineHeight: 1.45 }}>
           Claude and OpenAI models consume API credits. If a search returns a token limit error, it probably means the credits ran out ૮(◞ ‸ ◟ )ა
-          I also limit the output to 20 trails to reduce the chance of hitting limits, but you can always retry or adjust the location to find more trails. (˶ᵔ ᵕ ᵔ˶) ‹3
+          I show 10 trails first to reduce the chance of hitting limits, then you can load more up to 20 trails. (˶ᵔ ᵕ ᵔ˶) ‹3
         </span>
 
         <div style={{ width: 1, height: 20, background: "#ddd6cb" }} />
@@ -564,7 +581,7 @@ export default function HikingDashboard() {
             flexWrap: "wrap" }}>
             <span>{error}</span>
             {location.trim() && (
-              <button onClick={searchTrails} disabled={loading}
+              <button onClick={() => searchTrails(requestedLimit, { keepResults: trails.length > 0 })} disabled={loading}
                 style={{ height: 36, padding: "0 15px", border: "1px solid #ce5139",
                   borderRadius: 8, background: "#fff", color: "#ce5139", fontSize: 13,
                   fontWeight: 600, cursor: loading ? "not-allowed" : "pointer" }}>
@@ -624,11 +641,25 @@ export default function HikingDashboard() {
         )}
 
         {filtered.length > 0 && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))", gap: 22 }}>
-            {filtered.map((trail, i) => (
-              <TrailCard key={trail.id || i} trail={trail} startingPoint={startingPoint} />
-            ))}
-          </div>
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))", gap: 22 }}>
+              {filtered.map((trail, i) => (
+                <TrailCard key={trail.id || i} trail={trail} startingPoint={startingPoint} />
+              ))}
+            </div>
+            {searched && requestedLimit < MAX_TRAIL_LIMIT && trails.length >= requestedLimit && (
+              <div style={{ display: "flex", justifyContent: "center", marginTop: 28 }}>
+                <button onClick={() => searchTrails(MAX_TRAIL_LIMIT, { keepResults: true })} disabled={loading}
+                  style={{ height: 46, padding: "0 22px", border: "1px solid #557356",
+                    borderRadius: 8, background: loading ? "#eef5eb" : "#fff",
+                    color: "#557356", fontSize: 14, fontWeight: 600,
+                    cursor: loading ? "not-allowed" : "pointer",
+                    boxShadow: "0 8px 20px rgba(42,55,44,.06)" }}>
+                  Load more trails
+                </button>
+              </div>
+            )}
+          </>
         )}
       </main>
 
