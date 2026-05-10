@@ -492,7 +492,8 @@ export default function HikingDashboard() {
         ))}
         <span style={{ flexBasis: "100%", marginTop: -4, marginLeft: 1, color: "#7a857d",
           fontSize: 12, lineHeight: 1.45 }}>
-          Claude and OpenAI models consume API credits. If a search returns a token limit error, it probably means the credits ran out :)
+          Claude and OpenAI models consume API credits. If a search returns a token limit error, it probably means the credits ran out ૮(◞ ‸ ◟ )ა
+          I also limit the output to 20 trails to reduce the chance of hitting limits, but you can always retry or adjust the location to find more trails. (˶ᵔ ᵕ ᵔ˶) ‹3
         </span>
 
         <div style={{ width: 1, height: 20, background: "#ddd6cb" }} />
@@ -581,7 +582,9 @@ export default function HikingDashboard() {
               fontStyle: "italic", fontWeight: 300, color: "#526158", marginBottom: 10 }}>
               No trails found
             </div>
-            <div style={{ fontSize: 15, color: "#7e877f" }}>Try a different area or spelling</div>
+            <div style={{ fontSize: 15, color: "#7e877f" }}>
+              Live web search can miss on the first try. Retry once, or try a nearby area.
+            </div>
           </div>
         )}
 

@@ -114,6 +114,11 @@ function parseClaudeTrails(data) {
     const result = extractJson(block.text);
     if (result.length > 0) return result;
   }
+  console.log("parseClaudeTrails: no parseable trails. stop_reason:", data.stop_reason);
+  console.log("parseClaudeTrails: text sample:", (data.content || [])
+    .filter(b => b.type === "text")
+    .map(b => (b.text || "").slice(0, 300))
+    .join(" | "));
   return [];
 }
 
@@ -191,10 +196,24 @@ async function searchWithClaude(location, apiKey, stream) {
       return;
     }
 
-    const raw = parseClaudeTrails(data).map((t, j) => ({ ...t, id: allTrails.length + j + 1 }));
+    const parsed = parseClaudeTrails(data);
+    if (parsed.length === 0) {
+      console.log(`Claude returned no parseable trails on attempt ${i + 1} for location: ${location}`);
+      continue;
+    }
+
+    const raw = parsed.map((t, j) => ({ ...t, id: allTrails.length + j + 1 }));
     const batch = await Promise.all(raw.map(enrichWithImages));
     allTrails.push(...batch);
     sse(stream, { type: "batch", trails: batch, found: allTrails.length, total: TARGET });
+  }
+
+  if (allTrails.length === 0) {
+    sse(stream, {
+      type: "error",
+      error: "The search provider came back empty this time. This can happen with live web search; please retry the same search.",
+    });
+    return;
   }
 
   sse(stream, { type: "complete", found: allTrails.length, total: TARGET });
@@ -225,7 +244,16 @@ async function searchWithGPT(location, apiKey, stream) {
     return;
   }
 
-  const raw = parseOpenAITrails(data).map((t, i) => ({ ...t, id: i + 1 }));
+  const parsed = parseOpenAITrails(data);
+  if (parsed.length === 0) {
+    sse(stream, {
+      type: "error",
+      error: "The search provider came back empty this time. This can happen with live web search; please retry the same search.",
+    });
+    return;
+  }
+
+  const raw = parsed.map((t, i) => ({ ...t, id: i + 1 }));
   const trails = await Promise.all(raw.map(enrichWithImages));
   sse(stream, { type: "batch", trails, found: trails.length, total: TARGET });
   sse(stream, { type: "complete", found: trails.length, total: TARGET });
