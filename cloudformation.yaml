@@ -62,7 +62,7 @@ Resources:
     Properties:
       FunctionName: !Sub "hiking-dashboard-search-${AWS::Region}"
       Description: Calls Anthropic/OpenAI web search to find hiking trails
-      Runtime: nodejs20.x
+      Runtime: nodejs22.x
       Handler: handler.handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: 60
