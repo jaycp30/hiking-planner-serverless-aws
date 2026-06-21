@@ -3,26 +3,30 @@ Transform: AWS::Serverless-2016-10-31
 Description: Hiking Dashboard — Serverless backend + static frontend hosting
 
 Parameters:
-  AnthropicApiKey:
+  WorkspaceId:
     Type: String
-    NoEcho: true
-    Description: Your Anthropic API key (from console.anthropic.com)
+    Description: Your Claude Platform on AWS workspace ID (looks like wrkspc_...)
 
-  OpenAiApiKey:
+  HaikuModelId:
     Type: String
-    NoEcho: true
-    Default: ""
-    Description: Your OpenAI API key (from platform.openai.com)
+    Default: "claude-haiku-4-5"
+    Description: Bare first-party model ID for the fast/cheap model (Claude Platform on AWS)
+
+  SonnetModelId:
+    Type: String
+    Default: "claude-sonnet-4-6"
+    Description: Bare first-party model ID for the higher-quality model (Claude Platform on AWS)
 
 Globals:
   Function:
     Runtime: nodejs22.x
-    Timeout: 60        # web_search can take a while
+    Timeout: 90        # Claude's hosted web search loop can take a while
     MemorySize: 512
     Environment:
       Variables:
-        ANTHROPIC_API_KEY: !Ref AnthropicApiKey
-        OPENAI_API_KEY: !Ref OpenAiApiKey
+        ANTHROPIC_AWS_WORKSPACE_ID: !Ref WorkspaceId
+        HAIKU_MODEL_ID: !Ref HaikuModelId
+        SONNET_MODEL_ID: !Ref SonnetModelId
         TABLE_NAME: !Ref TrailImagesTable
 
 Resources:
@@ -47,10 +51,28 @@ Resources:
       FunctionName: hiking-dashboard-search
       Handler: handler.handler
       CodeUri: backend/
-      Description: Calls Anthropic API with web_search to find AllTrails data
+      Description: Calls Claude Platform on AWS (Claude + native web search) to find trail data
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref TrailImagesTable
+        # Least privilege: only the Messages API (CreateInference), scoped to this
+        # one Claude Platform on AWS workspace. SigV4 is signed with the Lambda role.
+        - Statement:
+            - Sid: ClaudePlatformInference
+              Effect: Allow
+              Action:
+                - aws-external-anthropic:CreateInference
+              Resource:
+                - !Sub "arn:aws:aws-external-anthropic:${AWS::Region}:${AWS::AccountId}:workspace/${WorkspaceId}"
+            # The SDK exchanges the role's credentials for a short-lived web
+            # identity token (workload identity) before calling the Claude endpoint.
+            - Sid: ClaudePlatformWebIdentity
+              Effect: Allow
+              Action:
+                - sts:GetWebIdentityToken
+                - sts:TagGetWebIdentityToken
+              Resource:
+                - !Sub "arn:aws:sts::${AWS::AccountId}:self"
       FunctionUrlConfig:
         AuthType: NONE
         InvokeMode: RESPONSE_STREAM

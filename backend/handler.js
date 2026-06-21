@@ -3,14 +3,42 @@
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const { DynamoDBDocumentClient, GetCommand, PutCommand } = require("@aws-sdk/lib-dynamodb");
 
-const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
-const OPENAI_API_URL    = "https://api.openai.com/v1/responses";
+// Claude Platform on AWS — Anthropic-operated, full first-party API parity
+// (including the hosted web_search server tool), authenticated with the Lambda
+// role via SigV4, billed post-paid on the AWS Marketplace invoice.
+// Reads AWS_REGION (set by Lambda) and ANTHROPIC_AWS_WORKSPACE_ID from the env.
+let AnthropicAws = require("@anthropic-ai/aws-sdk");
+AnthropicAws = AnthropicAws.default || AnthropicAws; // CJS/ESM interop
+const anthropic = new AnthropicAws();
+
+// ── Config ───────────────────────────────────────────────────────────────────
+// Bare first-party model IDs (no provider prefix on Claude Platform on AWS).
+const MODEL_IDS = {
+  haiku:  process.env.HAIKU_MODEL_ID  || "claude-haiku-4-5",
+  sonnet: process.env.SONNET_MODEL_ID || "claude-sonnet-4-6",
+};
 const SEARCH_CACHE_TTL_SECONDS = 6 * 60 * 60;
 const DEFAULT_TRAIL_LIMIT = 10;
 const MAX_TRAIL_LIMIT = 20;
+const MAX_TOKENS = 4096;
+const WEB_SEARCH_MAX_USES = 8;        // cap searches per request to bound cost
+const MAX_PAUSE_CONTINUATIONS = 6;    // resume the server tool loop at most N times
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
+// The hosted web search tool — Anthropic runs the search server-side and feeds
+// results back to the model. We just declare it; no client-side search needed.
+// allowed_callers: ["direct"] disables dynamic filtering (which relies on
+// programmatic tool calling), so this works on Haiku 4.5 — which doesn't support
+// PTC — as well as Sonnet 4.6.
+const WEB_SEARCH_TOOL = {
+  type: "web_search_20260209",
+  name: "web_search",
+  max_uses: WEB_SEARCH_MAX_USES,
+  allowed_callers: ["direct"],
+};
+
+// ── Cache key helpers ──────────────────────────────────────────────────────────
 function trailCacheKey(name) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 100);
 }
@@ -25,6 +53,7 @@ function searchCacheKey(location, model, limit) {
   return `search:${model || "haiku"}:${clampTrailLimit(limit)}:${trailCacheKey(location)}`;
 }
 
+// ── DynamoDB: image cache ────────────────────────────────────────────────────
 async function getCachedImages(name) {
   try {
     const result = await ddb.send(new GetCommand({
@@ -48,6 +77,7 @@ async function setCachedImages(name, images) {
   } catch (err) { console.error("DynamoDB write failed:", err); }
 }
 
+// ── DynamoDB: search-result cache ────────────────────────────────────────────
 async function getCachedSearch(location, model, limit) {
   try {
     const result = await ddb.send(new GetCommand({
@@ -82,6 +112,7 @@ async function setCachedSearch(location, model, limit, trails) {
   }
 }
 
+// ── Wikimedia image enrichment ───────────────────────────────────────────────
 async function fetchWikimediaImages(trailName) {
   const query = encodeURIComponent(`${trailName} hiking trail`);
   const url = `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=${query}&gsrnamespace=6&prop=imageinfo&iiprop=url&iiurlwidth=600&format=json&origin=*&gsrlimit=6`;
@@ -104,11 +135,17 @@ async function enrichWithImages(trail) {
   return { ...trail, photos: images };
 }
 
+// ── SSE helper ───────────────────────────────────────────────────────────────
+function sse(stream, data) {
+  stream.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
 const CORS_HEADERS = {
   "Content-Type": "text/event-stream",
   "Cache-Control": "no-cache",
 };
 
+// ── Prompt + JSON extraction ─────────────────────────────────────────────────
 const SYSTEM_PROMPT = `You are a worldwide hiking trail search assistant.
 Use the web_search tool to find hiking trails from two sources:
   1. AllTrails (alltrails.com) — best for global coverage
@@ -156,172 +193,80 @@ function extractJson(text) {
   return [];
 }
 
-function parseClaudeTrails(data) {
-  for (const block of (data.content || []).filter(b => b.type === "text")) {
+// Pull the trail JSON array out of the model's text content blocks.
+function parseClaudeTrails(message) {
+  for (const block of (message.content || []).filter(b => b.type === "text")) {
     const result = extractJson(block.text);
     if (result.length > 0) return result;
   }
-  console.log("parseClaudeTrails: no parseable trails. stop_reason:", data.stop_reason);
-  console.log("parseClaudeTrails: text sample:", (data.content || [])
-    .filter(b => b.type === "text")
-    .map(b => (b.text || "").slice(0, 300))
-    .join(" | "));
+  console.log("parseClaudeTrails: no parseable trails. stop_reason:", message.stop_reason);
   return [];
 }
 
-function parseOpenAITrails(data) {
-  // Try all output items regardless of type
-  for (const item of (data.output || [])) {
-    // Handle message items with content array
-    for (const content of (item.content || [])) {
-      const text = content.text || content.value || "";
-      if (!text) continue;
-      const result = extractJson(text);
-      if (result.length > 0) return result;
-    }
-    // Handle items with a direct text field
-    if (item.text) {
-      const result = extractJson(item.text);
-      if (result.length > 0) return result;
-    }
+// ── Claude (native web search) call ──────────────────────────────────────────
+async function callClaude(modelId, messages) {
+  let response = await anthropic.messages.create({
+    model: modelId,
+    max_tokens: MAX_TOKENS,
+    system: SYSTEM_PROMPT,
+    tools: [WEB_SEARCH_TOOL],
+    messages,
+  });
+
+  // The server-side web search loop pauses with stop_reason "pause_turn" when it
+  // hits its internal iteration limit — re-send to let it resume.
+  let continuations = 0;
+  while (response.stop_reason === "pause_turn" && continuations < MAX_PAUSE_CONTINUATIONS) {
+    continuations++;
+    messages.push({ role: "assistant", content: response.content });
+    response = await anthropic.messages.create({
+      model: modelId,
+      max_tokens: MAX_TOKENS,
+      system: SYSTEM_PROMPT,
+      tools: [WEB_SEARCH_TOOL],
+      messages,
+    });
   }
-  // Last resort: stringify entire response and hunt for a JSON array
-  const raw = JSON.stringify(data);
-  const match = raw.match(/\[[\s\S]*?\{[\s\S]*?"name"[\s\S]*?\}[\s\S]*?\]/);
-  if (match) {
-    try {
-      const parsed = JSON.parse(match[0]);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    } catch {}
-  }
-  const textSample = (data.output || []).flatMap(i => (i.content || []).map(c => (c.text || "").slice(0, 300))).join(" | ");
-  console.log("parseOpenAITrails: failed. Text sample:", textSample);
-  console.log("parseOpenAITrails: output structure:", JSON.stringify((data.output || []).map(i => ({ type: i.type, contentTypes: (i.content || []).map(c => c.type) }))));
-  return [];
+  return response;
 }
 
-function sse(stream, data) {
-  stream.write(`data: ${JSON.stringify(data)}\n\n`);
-}
-
-async function searchWithClaude(location, apiKey, stream, targetLimit = DEFAULT_TRAIL_LIMIT) {
-  const TARGET = clampTrailLimit(targetLimit);
-  const BATCH  = Math.min(5, TARGET);
-  const allTrails = [];
-  const maxAttempts = Math.ceil(TARGET / BATCH) + 1;
-
-  for (let i = 0; i < maxAttempts && allTrails.length < TARGET; i++) {
-    sse(stream, {
-      type: "progress",
-      found: allTrails.length,
-      total: TARGET,
-      message: i === 0 ? "Searching AllTrails and YAMAP..." : "Retrying live search for better trail data...",
-    });
-
-    const exclude = allTrails.length > 0
-      ? " Skip trails already found (search different areas or difficulty levels)."
-      : "";
-
-    const response = await fetch(ANTHROPIC_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 3000,
-        system: SYSTEM_PROMPT,
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
-        messages: [{
-          role: "user",
-          content: `Find ${BATCH} hiking trails near ${location}.${exclude} Include AllTrails URLs, and YAMAP URLs if this is a Japan location. Include photos where available.`,
-        }],
-      }),
-    });
-
-    const data = await response.json();
-
-    if (data.error) {
-      if (allTrails.length > 0) break;
-      sse(stream, { type: "error", error: data.error.message || "Anthropic API error" });
-      return;
-    }
-
-    const parsed = parseClaudeTrails(data);
-    if (parsed.length === 0) {
-      console.log(`Claude returned no parseable trails on attempt ${i + 1} for location: ${location}`);
-      continue;
-    }
-
-    sse(stream, {
-      type: "progress",
-      found: allTrails.length,
-      total: TARGET,
-      message: "Adding map details and trail photos...",
-    });
-    const remaining = TARGET - allTrails.length;
-    const raw = parsed.slice(0, remaining).map((t, j) => ({ ...t, id: allTrails.length + j + 1 }));
-    const batch = await Promise.all(raw.map(enrichWithImages));
-    allTrails.push(...batch);
-    sse(stream, {
-      type: "batch",
-      trails: batch,
-      found: allTrails.length,
-      total: TARGET,
-      message: `Found ${allTrails.length} trails so far...`,
-    });
-  }
-
-  if (allTrails.length === 0) {
-    sse(stream, {
-      type: "error",
-      error: "The search provider came back empty this time. This can happen with live web search; please retry the same search.",
-    });
-    return;
-  }
-
-  await setCachedSearch(location, "haiku", TARGET, allTrails);
-  sse(stream, { type: "complete", found: allTrails.length, total: TARGET });
-}
-
-async function searchWithGPT(location, apiKey, stream, targetLimit = DEFAULT_TRAIL_LIMIT) {
+async function searchTrails(location, modelKey, modelId, stream, targetLimit) {
   const TARGET = clampTrailLimit(targetLimit);
   let parsed = [];
 
+  // One retry — live web search occasionally comes back thin on the first pass.
   for (let attempt = 0; attempt < 2 && parsed.length === 0; attempt++) {
     sse(stream, {
       type: "progress",
       found: 0,
       total: TARGET,
-      message: attempt === 0 ? "Searching live trail sources..." : "Retrying live search for better trail data...",
+      message: attempt === 0 ? "Searching AllTrails and YAMAP..." : "Retrying live search for better trail data...",
     });
 
-    const response = await fetch(OPENAI_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-5.4-mini",
-        instructions: SYSTEM_PROMPT,
-        tools: [{ type: "web_search_preview" }],
-        input: `Find ${TARGET} hiking trails near ${location}. Include AllTrails URLs, and YAMAP URLs if this is a Japan location. Include photos where available. Reply with ONLY the JSON array, no other text.`,
-      }),
-    });
+    const messages = [{
+      role: "user",
+      content: `Find ${TARGET} hiking trails near ${location}. Use web_search to look them up on ` +
+        `AllTrails (and YAMAP if this is in Japan). Include real AllTrails/YAMAP URLs and photos ` +
+        `where available. Reply with ONLY the JSON array.`,
+    }];
 
-    const data = await response.json();
-
-    if (data.error) {
-      sse(stream, { type: "error", error: data.error.message || "OpenAI API error" });
+    let response;
+    try {
+      response = await callClaude(modelId, messages);
+    } catch (err) {
+      // Log full detail (ARNs, IAM actions, stack) to CloudWatch only — never to the client.
+      console.error("Claude call failed:", err);
+      if (attempt === 0) continue;
+      sse(stream, {
+        type: "error",
+        error: "The trail search service is temporarily unavailable. Please try again in a moment.",
+      });
       return;
     }
 
-    parsed = parseOpenAITrails(data);
+    parsed = parseClaudeTrails(response);
     if (parsed.length === 0) {
-      console.log(`OpenAI returned no parseable trails on attempt ${attempt + 1} for location: ${location}`);
+      console.log(`Claude returned no parseable trails on attempt ${attempt + 1} for: ${location}`);
     }
   }
 
@@ -339,9 +284,11 @@ async function searchWithGPT(location, apiKey, stream, targetLimit = DEFAULT_TRA
     total: TARGET,
     message: "Adding map details and trail photos...",
   });
+
   const raw = parsed.slice(0, TARGET).map((t, i) => ({ ...t, id: i + 1 }));
   const trails = await Promise.all(raw.map(enrichWithImages));
-  await setCachedSearch(location, "gpt54", TARGET, trails);
+  await setCachedSearch(location, modelKey, TARGET, trails);
+
   sse(stream, {
     type: "batch",
     trails,
@@ -352,6 +299,7 @@ async function searchWithGPT(location, apiKey, stream, targetLimit = DEFAULT_TRA
   sse(stream, { type: "complete", found: trails.length, total: TARGET });
 }
 
+// ── Lambda entrypoint (streaming response) ────────────────────────────────────
 const handler = awslambda.streamifyResponse(async (event, responseStream) => {
   if (event.requestContext?.http?.method === "OPTIONS") {
     awslambda.HttpResponseStream.from(responseStream, {
@@ -374,7 +322,8 @@ const handler = awslambda.streamifyResponse(async (event, responseStream) => {
     const body = JSON.parse(event.body || "{}");
     const { location, model, limit } = body;
     const searchLocation = location?.trim();
-    const searchModel = model === "gpt54" ? "gpt54" : "haiku";
+    const modelKey = model === "sonnet" ? "sonnet" : "haiku";
+    const modelId = MODEL_IDS[modelKey];
     const searchLimit = clampTrailLimit(limit);
 
     if (!searchLocation) {
@@ -389,7 +338,8 @@ const handler = awslambda.streamifyResponse(async (event, responseStream) => {
       total: searchLimit,
       message: "Checking recent searches...",
     });
-    const cached = await getCachedSearch(searchLocation, searchModel, searchLimit);
+
+    const cached = await getCachedSearch(searchLocation, modelKey, searchLimit);
     if (cached) {
       sse(stream, {
         type: "batch",
@@ -404,26 +354,12 @@ const handler = awslambda.streamifyResponse(async (event, responseStream) => {
       return;
     }
 
-    if (searchModel === "gpt54") {
-      const apiKey = process.env.OPENAI_API_KEY;
-      if (!apiKey) {
-        sse(stream, { type: "error", error: "OpenAI API key not configured" });
-        stream.end();
-        return;
-      }
-      await searchWithGPT(searchLocation, apiKey, stream, searchLimit);
-    } else {
-      const apiKey = process.env.ANTHROPIC_API_KEY;
-      if (!apiKey) {
-        sse(stream, { type: "error", error: "Anthropic API key not configured" });
-        stream.end();
-        return;
-      }
-      await searchWithClaude(searchLocation, apiKey, stream, searchLimit);
-    }
+    await searchTrails(searchLocation, modelKey, modelId, stream, searchLimit);
   } catch (err) {
+    // Full detail to CloudWatch only; the client gets a generic message so we
+    // never leak account IDs, role ARNs, IAM actions, or stack traces.
     console.error("Handler error:", err);
-    sse(stream, { type: "error", error: err.message || "Internal server error" });
+    sse(stream, { type: "error", error: "Something went wrong on our end. Please try again." });
   }
 
   stream.end();

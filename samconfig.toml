@@ -8,6 +8,11 @@ region = "ap-northeast-1"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
 image_repositories = []
+# Pin the bare first-party model IDs (Claude Platform on AWS) so plain `sam deploy`
+# never reverts to a stale value. WorkspaceId is account-specific and is kept out
+# of source — pass it on the CLI (it's retained as the stack's previous value on
+# subsequent deploys): sam deploy --parameter-overrides WorkspaceId=wrkspc_...
+parameter_overrides = "HaikuModelId=claude-haiku-4-5 SonnetModelId=claude-sonnet-4-6"
 
 [default.global.parameters]
 region = "ap-northeast-1"

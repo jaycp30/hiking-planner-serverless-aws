@@ -43,15 +43,19 @@ These three tools solve the same problem (deploying AWS infrastructure) but at v
 Browser
   └── CloudFront (CDN, HTTPS, global edge)
         ├── S3 (React static files)
-        └── API Gateway v2 HTTP API
-              └── Lambda (Node.js 22, handler.js)
-                    └── Anthropic API (web_search tool)
+        └── Lambda Function URL (Node.js 22, RESPONSE_STREAM)
+              └── handler.js
+                    ├── Claude Platform on AWS  (Claude + native web_search,
+                    │     authenticated by the Lambda role via SigV4 — no API key)
+                    └── DynamoDB  (search + trail-image cache, TTL'd)
 ```
 
 **Why this shape:**
 - **S3 + CloudFront** serves the React app. S3 is cheap (~$0.02/month for a 1MB app). CloudFront puts it on edge nodes globally, including Asia-Pacific.
-- **API Gateway + Lambda** handles the backend. Serverless means you pay only when someone actually searches — no idle EC2 or container sitting running 24/7.
-- **No VPC, no RDS, no containers.** The app has no database, no persistent state. Everything is stateless, which is why serverless fits perfectly.
+- **Lambda Function URL** (not API Gateway) is what the frontend calls, because the backend **streams** Server-Sent Events as trails are found — API Gateway v2 caps responses at 29s, while a Function URL in `RESPONSE_STREAM` mode does not. (An API Gateway route still exists in the template for non-streaming use.)
+- **Serverless** means you pay only when someone actually searches — no idle EC2 or container running 24/7.
+- **DynamoDB** is a small cache (recent searches + per-trail Wikimedia photos) with a TTL, so repeat searches are instant and cheap. No relational DB, no VPC, no containers.
+- **Claude Platform on AWS** runs the model *and* the web search on Anthropic's infrastructure, billed post-paid on the AWS Marketplace invoice. The Lambda authenticates with its **IAM role via SigV4** — there is no API key to store or rotate (see §8).
 
 ---
 
@@ -61,7 +65,7 @@ Browser
 ```bash
 sam build
 ```
-Reads `template.yaml`, finds the Lambda code in `backend/`, zips it, and puts the packaged artifact in `.aws-sam/build/`. For Node.js, this also runs `npm install` to pull dependencies. Since our Lambda had no npm dependencies (Node 20 has native `fetch`), this step was near-instant.
+Reads `template.yaml`, finds the Lambda code in `backend/`, zips it, and puts the packaged artifact in `.aws-sam/build/`. For Node.js, this also runs `npm install` to pull dependencies — here that's `@anthropic-ai/aws-sdk` (the Claude Platform on AWS client) plus the DynamoDB SDK clients, so the build does real install work rather than being instant.
 
 **Key output:** `.aws-sam/build/template.yaml` — a transformed version of your template with absolute paths to the packaged code.
 
@@ -204,12 +208,49 @@ Anything outside SAM's scope you handle yourself — shell scripts, Makefiles, o
 **When to use SAM:** APIs, event-driven functions, scheduled jobs, webhook handlers. Anything that's Lambda-centric.  
 **When to reach for something else:** Full-stack apps with complex frontends (Amplify), multi-service platforms with databases and containers (CDK or Terraform), or situations where you need maximum infrastructure control (raw CloudFormation).
 
+---
+
+## 8. Migration: Anthropic/OpenAI API keys → Claude Platform on AWS
+
+The app originally called the first-party Anthropic API (and OpenAI) directly, with API keys stored as `NoEcho` CloudFormation parameters. It was later migrated to run entirely on **Claude Platform on AWS**. This section captures what changed and why.
+
+### Three ways to run Claude on AWS — they are not the same
+
+| | **Amazon Bedrock** | **Claude Platform on AWS** | First-party Anthropic API |
+|---|---|---|---|
+| Operated by | AWS (partner) | **Anthropic**, via AWS infra | Anthropic |
+| Native `web_search` tool | ❌ none | ✅ yes | ✅ yes |
+| Billing | AWS bill, post-paid | **AWS Marketplace, post-paid** | Prepaid credits |
+| Auth | IAM (SigV4) | **IAM (SigV4)** | API key |
+| Model IDs | `jp.anthropic.claude-…` | bare `claude-haiku-4-5` | bare `claude-haiku-4-5` |
+
+The key realization: **Bedrock has no built-in web search for Claude** — that tool only exists on Anthropic-operated surfaces. So a Bedrock migration would have forced a third-party search vendor (we briefly used Tavily and hit its free-tier rate limit). **Claude Platform on AWS** gives the native search *and* post-paid AWS billing with no prepaid credits — exactly what this app needed.
+
+### Auth model — no more API keys
+
+The Lambda authenticates with its own **execution role** via SigV4; the `@anthropic-ai/aws-sdk` client signs every request automatically. There is no secret to store, so the stack has no `NoEcho` key parameter anymore — the auth *is* the IAM role. Least-privilege policy on that role:
+
+- `aws-external-anthropic:CreateInference` — scoped to the **workspace ARN** (`arn:aws:aws-external-anthropic:{region}:{account}:workspace/{workspace-id}`)
+- `sts:GetWebIdentityToken` + `sts:TagGetWebIdentityToken` — on `arn:aws:sts::{account}:self` (the SDK exchanges the role's credentials for a short-lived workload-identity token before calling Claude)
+- `dynamodb:*` — on the cache table only
+
+The only deploy input is the **workspace ID** (`wrkspc_...`), passed as a plain parameter — not a secret.
+
+### Issues we hit during this migration (and the lesson in each)
+
+The errors got progressively more specific — that's the signal each fix is landing, not failing:
+
+1. **`CreateInference` denied** → the role had no Claude-on-AWS permission. Added the scoped inference action.
+2. **`sts:GetWebIdentityToken` denied** → Claude Platform on AWS uses AWS *workload identity*; the SDK first exchanges role credentials for a web-identity token. Added the STS action on `:self`.
+3. **`sts:TagGetWebIdentityToken` denied** → the tagged variant of the same exchange. Added it alongside the first. (Lesson: grant the **specific** STS actions, not `sts:*`.)
+4. **`404 model: jp.anthropic.claude-haiku-4-5-…`** → a stale Bedrock model ID. CloudFormation **keeps the previous parameter value** when you don't pass it on update, so the new template default wasn't picked up. Fixed by passing the bare IDs explicitly, then pinning them in `samconfig.toml`.
+5. **`400 … does not support programmatic tool calling`** → the `web_search_20260209` tool defaults to *dynamic filtering*, which Haiku 4.5 can't do. Set `allowed_callers: ["direct"]` on the tool so it's called directly by the model — works on every model.
+
+### Don't leak backend errors to the browser
+
+Early on, the raw AWS error (including the account ID and role ARN) was rendered straight to the user. Fixed by sanitizing: the client now gets a generic *"temporarily unavailable"* message, and the full error — ARNs, IAM actions, stack traces — goes only to CloudWatch via `console.error`. An account ID isn't a credential, but internal detail should never reach end users.
 
 ---
 
-Demo (webapp is not optimized for mobile web browser): 
+Demo (now responsive for desktop and mobile):
 [https://d2dxl1mmddrrze.cloudfront.net](https://1drv.ms/v/c/060d23632df8ec38/IQBPFIK6AnNgTponA_W9GEcBASd_L7K9BqaLFMVM5CGIndY?e=YWk4Fp)
-
----
----
-

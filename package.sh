@@ -21,13 +21,16 @@ echo "=== Hiking Dashboard — CloudFormation Deploy ==="
 echo "Region: $REGION"
 echo ""
 
-# ── Prompt for Anthropic API key ─────────────────────────────────────────────
-echo -n "Enter your Anthropic API key: "
-read -s ANTHROPIC_KEY
+# ── Prompt for Claude Platform on AWS workspace ID ───────────────────────────
+# Trail data comes from Claude Platform on AWS (Claude + native web search).
+# Access is granted via the function's IAM role (SigV4), so there is no secret
+# key — we only need the workspace ID (looks like wrkspc_...) to route requests.
+echo -n "Enter your Claude Platform on AWS workspace ID (wrkspc_...): "
+read WORKSPACE_ID
 echo ""
 
-if [ -z "$ANTHROPIC_KEY" ]; then
-  echo "Error: Anthropic API key is required."
+if [ -z "$WORKSPACE_ID" ]; then
+  echo "Error: workspace ID is required."
   exit 1
 fi
 
@@ -85,8 +88,7 @@ aws cloudformation deploy \
   --region "$REGION" \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
-    AnthropicApiKey="$ANTHROPIC_KEY" \
-    OpenAiApiKey="${OPENAI_API_KEY:-}" \
+    WorkspaceId="$WORKSPACE_ID" \
     LambdaCodeBucket="$STAGING_BUCKET" \
     LambdaCodeKey="$LAMBDA_KEY"
 

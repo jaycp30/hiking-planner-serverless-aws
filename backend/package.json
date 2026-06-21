@@ -1,12 +1,13 @@
 {
   "name": "hiking-dashboard-backend",
   "version": "1.0.0",
-  "description": "Lambda backend for Japan Hiking Dashboard",
+  "description": "Lambda backend for the Hiking Dashboard — Claude Platform on AWS with native web search",
   "main": "handler.js",
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
+    "@anthropic-ai/aws-sdk": "^0.4",
     "@aws-sdk/client-dynamodb": "^3",
     "@aws-sdk/lib-dynamodb": "^3"
   }

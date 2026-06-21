@@ -434,6 +434,54 @@ export default function HikingDashboard() {
           }
         }
         @keyframes bounce { 0%,80%,100%{transform:scale(.7);opacity:.4} 40%{transform:scale(1);opacity:1} }
+
+        /* ── Responsive layout ── */
+        /* Shared horizontal gutter so every section lines up at any width. */
+        .search-panel, .toolbar, .main-content, .app-footer { margin-inline: 48px; }
+        .main-content { margin-inline: 0; padding: 32px 48px 40px; }
+
+        .search-panel {
+          padding: 26px;
+          display: grid;
+          grid-template-columns: 1fr 1fr auto;
+          gap: 26px;
+          align-items: end;
+          border: 1px solid #e4ded2;
+          border-radius: 14px;
+          background: rgba(255,255,255,.9);
+          box-shadow: 0 8px 24px rgba(42,55,44,.06);
+        }
+        .search-btn { height: 58px; padding: 0 36px; }
+
+        .toolbar {
+          margin-top: 32px;
+          display: flex;
+          gap: 14px;
+          align-items: center;
+          flex-wrap: wrap;
+        }
+        .toolbar-spacer { flex: 1; }
+
+        .trail-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+          gap: 22px;
+        }
+
+        /* Tablet */
+        @media (max-width: 900px) {
+          .search-panel { grid-template-columns: 1fr; gap: 16px; }
+          .search-btn { width: 100%; }
+        }
+
+        /* Phone — tighten the gutter and let the toolbar breathe vertically. */
+        @media (max-width: 760px) {
+          .search-panel, .toolbar, .app-footer { margin-inline: 16px; }
+          .main-content { padding: 24px 16px 32px; }
+          .toolbar { gap: 10px; }
+          .toolbar-spacer { display: none; }
+          .toolbar select { flex: 1; min-width: 0; }
+        }
       `}</style>
 
       {/* ── HERO ── */}
@@ -468,10 +516,7 @@ export default function HikingDashboard() {
       </div>
 
       {/* ── SEARCH ── */}
-      <div style={{ margin: "0 48px", padding: 26, display: "grid",
-        gridTemplateColumns: "1fr 1fr auto", gap: 26, alignItems: "end",
-        border: "1px solid #e4ded2", borderRadius: 14, background: "rgba(255,255,255,.9)",
-        boxShadow: "0 8px 24px rgba(42,55,44,.06)" }}>
+      <div className="search-panel">
         <div>
           <label style={{ display: "block", marginBottom: 10, color: "#527056",
             font: '11px "Space Mono", monospace', letterSpacing: ".16em", textTransform: "uppercase" }}>
@@ -496,8 +541,8 @@ export default function HikingDashboard() {
               border: "1px solid #ddd6cb", borderRadius: 8, background: "#fff",
               color: "#26392f", fontSize: 15 }} />
         </div>
-        <button onClick={() => searchTrails(INITIAL_TRAIL_LIMIT)} disabled={loading || !location.trim()}
-          style={{ height: 58, padding: "0 36px", border: "none", borderRadius: 8,
+        <button className="search-btn" onClick={() => searchTrails(INITIAL_TRAIL_LIMIT)} disabled={loading || !location.trim()}
+          style={{ border: "none", borderRadius: 8,
             background: loading || !location.trim() ? "#8aaa90" : "linear-gradient(#668462,#466747)",
             color: "#fff", fontSize: 16, fontWeight: 500,
             boxShadow: loading || !location.trim() ? "none" : "0 12px 22px rgba(70,103,71,.18)",
@@ -507,11 +552,11 @@ export default function HikingDashboard() {
       </div>
 
       {/* ── TOOLBAR ── */}
-      <div style={{ margin: "32px 48px 0", display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+      <div className="toolbar">
 
         {/* AI Model */}
         <span style={monoLabel}>AI Model</span>
-        {[{ id: "haiku", label: "Claude Haiku 4.5" }, { id: "gpt54", label: "GPT-5.4 Mini" }].map(m => (
+        {[{ id: "haiku", label: "Claude Haiku 4.5" }, { id: "sonnet", label: "Claude Sonnet 4.6" }].map(m => (
           <button key={m.id} onClick={() => setModel(m.id)} disabled={loading}
             style={{ height: 39, padding: "0 18px", display: "inline-flex", alignItems: "center",
               border: `1px solid ${model === m.id ? "#557356" : "#ddd6cb"}`,
@@ -524,8 +569,8 @@ export default function HikingDashboard() {
         ))}
         <span style={{ flexBasis: "100%", marginTop: -4, marginLeft: 1, color: "#7a857d",
           fontSize: 12, lineHeight: 1.45 }}>
-          Claude and OpenAI models consume API credits. If a search returns a token limit error, it probably means the credits ran out ૮(◞ ‸ ◟ )ა
-          I show 10 trails first to reduce the chance of hitting limits, then you can load more up to 20 trails. (˶ᵔ ᵕ ᵔ˶) ‹3
+          Searches run on Claude (via Claude Platform on AWS) with native live web search, billed to AWS per request. Sonnet 4.6 costs more than Haiku 4.5 but tends to return richer results ૮(◞ ‸ ◟ )ა
+          I show 10 trails first to keep things fast and cheap, then you can load more up to 20 trails. (˶ᵔ ᵕ ᵔ˶) ‹3
         </span>
 
         <div style={{ width: 1, height: 20, background: "#ddd6cb" }} />
@@ -549,7 +594,7 @@ export default function HikingDashboard() {
           );
         })}
 
-        <div style={{ flex: 1 }} />
+        <div className="toolbar-spacer" />
 
         {/* Sort */}
         <span style={monoLabel}>Sort by</span>
@@ -573,7 +618,7 @@ export default function HikingDashboard() {
       </div>
 
       {/* ── MAIN CONTENT ── */}
-      <main style={{ padding: "32px 48px 40px" }}>
+      <main className="main-content">
         {error && (
           <div style={{ background: "#fff0ec", border: "1px solid #f5c2be", borderRadius: 8,
             color: "#ce5139", padding: "14px 18px", marginBottom: 24, fontSize: 14,
@@ -642,7 +687,7 @@ export default function HikingDashboard() {
 
         {filtered.length > 0 && (
           <>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))", gap: 22 }}>
+            <div className="trail-grid">
               {filtered.map((trail, i) => (
                 <TrailCard key={trail.id || i} trail={trail} startingPoint={startingPoint} />
               ))}
@@ -664,7 +709,7 @@ export default function HikingDashboard() {
       </main>
 
       {/* ── FOOTER ── */}
-      <footer style={{ margin: "0 48px", padding: "20px 0 30px", display: "flex", gap: 20,
+      <footer className="app-footer" style={{ padding: "20px 0 30px", display: "flex", gap: 20,
         alignItems: "center", borderTop: "1px solid #e4ded2", color: "#69756e", flexWrap: "wrap" }}>
         <span style={monoLabel}>Difficulty key:</span>
         {["easy", "moderate", "hard"].map(d => (
@@ -674,7 +719,7 @@ export default function HikingDashboard() {
           </span>
         ))}
         <span style={{ marginLeft: "auto", fontSize: 13 }}>
-          Powered by <strong style={{ color: "#4a8c42" }}>AllTrails</strong> &amp; <strong style={{ color: "#4a8c42" }}>YAMAP</strong> via <strong style={{ color: "#4a8c42" }}>Claude AI</strong> &amp; <strong style={{ color: "#4a8c42" }}>OpenAI</strong>
+          Powered by <strong style={{ color: "#4a8c42" }}>AllTrails</strong> &amp; <strong style={{ color: "#4a8c42" }}>YAMAP</strong> via <strong style={{ color: "#4a8c42" }}>Claude on AWS</strong>
         </span>
         <div style={{ width: "100%", fontSize: 11, color: "#9aa099", fontStyle: "italic", textAlign: "right" }}>
           Trail photos sourced from Wikimedia Commons and may not accurately represent each trail.

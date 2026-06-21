@@ -2,7 +2,7 @@
 
 Region: ap-northeast-1 (Tokyo)
 Estimated infra cost: ~$0/month (within AWS free tier for personal use)
-Anthropic API: prepaid credits, charged per search (~$0.01–0.05 per search)
+Claude Platform on AWS: charged per token + per web search (~$10 / 1,000 searches), post-paid on your AWS Marketplace invoice (Haiku cheaper than Sonnet)
 
 ---
 
@@ -22,9 +22,12 @@ aws configure
 ```
 
 You also need:
-- An AWS account
-- An Anthropic API key from https://console.anthropic.com
-  (separate from Claude Pro — create an account, buy prepaid credits)
+- An AWS account with a **Claude Platform on AWS** subscription (AWS Marketplace)
+  and a **workspace** provisioned in `ap-northeast-1`. You pass the workspace ID
+  (looks like `wrkspc_...`) at deploy time. This is Anthropic-operated and has the
+  native Claude `web_search` tool — no separate search vendor and no API key to
+  manage; the Lambda role authenticates via SigV4 and billing is post-paid on your
+  AWS Marketplace invoice.
 
 ---
 
@@ -69,7 +72,7 @@ sam deploy --guided \
 When prompted:
 - **Stack Name**: `hiking-dashboard`
 - **AWS Region**: `ap-northeast-1`
-- **AnthropicApiKey**: paste your key (input is hidden)
+- **WorkspaceId**: paste your Claude Platform on AWS workspace ID (`wrkspc_...`)
 - **Confirm changes before deploy**: `y`
 - **Allow SAM CLI IAM role creation**: `y`
 - **Save arguments to configuration file**: `y`
@@ -85,7 +88,7 @@ chmod +x package.sh
 ./package.sh
 ```
 
-The script will prompt you for your Anthropic API key and handle everything else.
+The script will prompt you for your Claude Platform on AWS workspace ID and handle everything else.
 
 ---
 
@@ -108,7 +111,7 @@ From the project root:
 # Build the SAM app
 sam build
 
-# Deploy — this will prompt you for the Anthropic API key
+# Deploy — this will prompt you for the workspace ID
 sam deploy --guided \
   --stack-name hiking-dashboard \
   --region ap-northeast-1 \
@@ -118,7 +121,7 @@ sam deploy --guided \
 When prompted:
 - **Stack Name**: `hiking-dashboard`
 - **AWS Region**: `ap-northeast-1`
-- **AnthropicApiKey**: paste your key (input is hidden)
+- **WorkspaceId**: paste your Claude Platform on AWS workspace ID (`wrkspc_...`)
 - **Confirm changes before deploy**: `y`
 - **Allow SAM CLI IAM role creation**: `y`
 - **Save arguments to configuration file**: `y` (saves to samconfig.toml for future deploys)
@@ -215,10 +218,10 @@ sam delete --stack-name hiking-dashboard --region ap-northeast-1
 | API Gateway (HTTP) | 1M requests | $0 |
 | S3 | 5GB, 20K GET requests | $0 |
 | CloudFront | 1TB transfer, 10M requests | $0 |
-| Anthropic API | — | $0.01–0.05 per search |
+| Claude on AWS (tokens + web search) | — | ~$0.01–0.06 per search |
 
 For personal + friends use, you'll likely stay within free tier on AWS indefinitely.
-The only real cost is Anthropic API credits — budget $5–10 to start.
+The only real cost is Claude on AWS usage (tokens + web search) — budget $5–10 to start.
 
 ---
 
